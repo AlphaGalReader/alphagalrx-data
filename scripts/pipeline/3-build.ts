@@ -32,8 +32,9 @@ const display = (ingredient: string) => ingredient.replace(/(^|\/\s)([a-z])/g, (
 
 /** Order strengths the way patients look for them: pills first, auto-injectors before IV products. */
 function formRank(name: string): number {
-  if (/ Oral Tablet$/.test(name)) return 0;
-  if (/ Oral Capsule$/.test(name)) return 1;
+  const modified = /Release|Disintegrating|Chewable/.test(name) ? 0.5 : 0; // plain tablets before delayed-release etc.
+  if (/ Oral Tablet$/.test(name)) return 0 + modified;
+  if (/ Oral Capsule$/.test(name)) return 1 + modified;
   if (/Auto-Injector/.test(name)) return 2;
   if (/Oral/.test(name)) return 3;
   if (/Inject/.test(name)) return 4;
