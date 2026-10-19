@@ -1,0 +1,82 @@
+# Monthly refresh of the published drug index.
+#
+# 1. Restores the parsed-label store saved by the previous run (release "pipeline-state").
+# 2. Applies DailyMed's latest monthly update, refreshes RxNorm, rebuilds the index.
+# 3. Runs sanity checks; a failed check stops here, so the previous data stays live.
+# 4. Publishes catalog.json + shards/ to GitHub Pages under /v1/.
+# 5. Saves the updated label store for next month.
+
+name: Refresh drug data
+
+on:
+  schedule:
+    - cron: '0 9 20 * *' # 20th of each month; DailyMed's monthly update is out by then
+  workflow_dispatch: {}
+
+permissions:
+  contents: write # update the pipeline-state release
+  pages: write
+  id-token: write
+
+concurrency:
+  group: refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Restore label store
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p pipeline-data
+          gh release download pipeline-state --pattern 'pipeline-state.tar.gz' --dir /tmp
+          tar -xzf /tmp/pipeline-state.tar.gz -C pipeline-data
+
+      - name: Apply DailyMed monthly update
+        run: npm run labels:update
+
+      - name: Refresh RxNorm codes and brands
+        run: npm run rxnorm
+
+      - name: Build index
+        run: NODE_OPTIONS=--max-old-space-size=6144 npm run build
+
+      - name: Check the build looks sane
+        run: npm run check
+
+      - name: Prepare site
+        run: |
+          mkdir -p site/v1
+          cp -R pipeline-data/dist/. site/v1/
+          cp README.md site/README.md
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - id: deploy
+        uses: actions/deploy-pages@v4
+
+      - name: Save label store for next month
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tar -czf /tmp/pipeline-state.tar.gz -C pipeline-data labels bulk-state.json
+          gh release upload pipeline-state /tmp/pipeline-state.tar.gz --clobber
