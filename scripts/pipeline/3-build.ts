@@ -30,18 +30,37 @@ export function ingredientOf(name: string): string {
 
 const display = (ingredient: string) => ingredient.replace(/(^|\/\s)([a-z])/g, (_, p, c) => p + c.toUpperCase());
 
+/** Order strengths the way patients look for them: pills first, auto-injectors before IV products. */
 function formRank(name: string): number {
   if (/ Oral Tablet$/.test(name)) return 0;
   if (/ Oral Capsule$/.test(name)) return 1;
-  if (/Oral/.test(name)) return 2;
-  if (/Auto-Injector|Inject/.test(name)) return 3;
-  return 4;
+  if (/Auto-Injector/.test(name)) return 2;
+  if (/Oral/.test(name)) return 3;
+  if (/Inject/.test(name)) return 4;
+  return 5;
+}
+
+/** "NDA019430 0.3 ML epinephrine 0.5 MG/ML Auto-Injector" → "EpiPen 0.15 mg auto-injector" */
+function autoInjectorLabel(name: string, brandByNda: Map<string, string>): string | undefined {
+  const m = name.match(/^(NDA\d+) ([\d.]+) ML .* ([\d.]+) MG\/ML Auto-Injector$/);
+  if (!m) return undefined;
+  const dose = +(parseFloat(m[2]) * parseFloat(m[3])).toFixed(3);
+  return `${brandByNda.get(m[1]) ?? 'Generic'} ${dose} mg auto-injector`;
 }
 
 function main() {
   const mapping = readJson<MappingFile>(MAPPING_JSON);
   const rxnorm = readJson<RxnormFile>(RXNORM_JSON);
   rmSync(join(DIST, 'shards'), { recursive: true, force: true });
+
+  // Brand for each FDA application number, e.g. NDA019430 → EpiPen.
+  const brandByNda = new Map<string, string>();
+  for (const info of Object.values(rxnorm.scd)) {
+    for (const b of info.brands) {
+      const m = b.name.match(/^(NDA\d+) .*\[([^\]]+)\]$/);
+      if (m) brandByNda.set(m[1], m[2] === 'Epipen' ? 'EpiPen' : m[2]);
+    }
+  }
 
   const groups = new Map<string, CatalogDrug>();
   const scds = Object.keys(rxnorm.scd);
@@ -74,10 +93,12 @@ function main() {
     const ingredient = ingredientOf(info.name);
     const drug = groups.get(ingredient) ?? { name: display(ingredient), brands: [], strengths: [] };
     for (const b of info.brands) {
-      const brand = b.name.match(/\[([^\]]+)\]$/)?.[1]?.replace(/\s+Reformulated.*$/, '');
+      const raw = b.name.match(/\[([^\]]+)\]$/)?.[1]?.replace(/\s+Reformulated.*$/, '');
+      const brand = raw === 'Epipen' ? 'EpiPen' : raw;
       if (brand && !drug.brands.includes(brand)) drug.brands.push(brand);
     }
-    drug.strengths.push({ rxcui, name: info.name });
+    const label = autoInjectorLabel(info.name, brandByNda);
+    drug.strengths.push({ rxcui, name: info.name, ...(label ? { label } : {}) });
     groups.set(ingredient, drug);
 
     if ((i + 1) % 2000 === 0) progress('shards', i + 1, scds.length, started);

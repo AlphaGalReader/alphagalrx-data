@@ -14,12 +14,13 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync
 import { join } from 'node:path';
 import { parseSpl } from '../../src/core/spl';
 import type { Label } from '../../src/core/types';
-import { DATA, labelFile, MAPPING_JSON, progress, readJson, writeJson, type MappingFile } from './common';
+import { DATA, labelFile, MAPPING_JSON, progress, readJson, sleep, writeJson, type MappingFile } from './common';
 
 const BASE = 'https://dailymed-data.nlm.nih.gov/public-release-files';
 const PARTS = [
   ...Array.from({ length: 6 }, (_, i) => `release_human_rx_part${i + 1}`),
   ...Array.from({ length: 12 }, (_, i) => `release_human_otc_part${i + 1}`),
+  'release_remainder', // vaccines, allergen extracts, blood products and other biologics
 ];
 const BULK = join(DATA, 'bulk');
 const STATE = join(DATA, 'bulk-state.json');
@@ -100,6 +101,37 @@ function processBulkFile(name: string, wanted: Set<string>) {
   console.log(`✅ ${name}: kept ${kept}, not linked to a drug product ${skipped}, failed ${failed}`);
 }
 
+/**
+ * Labels the bulk files didn't contain (e.g. published after the release was
+ * built) are fetched one by one from the DailyMed API, slowly enough to stay
+ * under its rate limit, pausing when it asks (HTTP 429 + Retry-After).
+ */
+async function fillMissing(wanted: Set<string>, versions: Record<string, string>) {
+  const missing = [...wanted].filter((s) => !existsSync(labelFile(s)));
+  console.log(`🧩 Fetching ${missing.length} labels missing from the bulk files…`);
+  const started = Date.now();
+  let failed = 0;
+  for (const [i, setid] of missing.entries()) {
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      const res = await fetch(`https://dailymed.nlm.nih.gov/dailymed/services/v2/spls/${setid}.xml`).catch(() => null);
+      if (res?.status === 429) {
+        await sleep(1000 * (Number(res.headers.get('retry-after')) || 60) + 1000);
+        continue;
+      }
+      if (res?.ok) {
+        const xml = await res.text();
+        writeJson(labelFile(setid), { ...parseSpl(xml, { setid, title: '', publishedDate: '' }), version: versions[setid] } satisfies StoredLabel);
+      } else {
+        failed++;
+      }
+      break;
+    }
+    await sleep(500);
+    if ((i + 1) % 250 === 0) progress('   missing labels', i + 1, missing.length, started);
+  }
+  console.log(`🧩 Done; ${failed} could not be fetched.`);
+}
+
 function latestMonthlyUpdate(): string {
   const html = execFileSync('curl', ['-sSfL', 'https://dailymed.nlm.nih.gov/dailymed/spl-resources-all-drug-labels.cfm']).toString();
   const m = html.match(/dm_spl_(monthly_update_[a-z]{3}\d{4})\.zip/);
@@ -107,7 +139,7 @@ function latestMonthlyUpdate(): string {
   return m[1];
 }
 
-function main() {
+async function main() {
   mkdirSync(BULK, { recursive: true });
   console.log('Downloading DailyMed → RxNorm mapping…');
   const mapping = downloadMapping();
@@ -132,6 +164,8 @@ function main() {
     state.done[name] = new Date().toISOString().slice(0, 10);
     writeFileSync(STATE, JSON.stringify(state, null, 2));
   }
+
+  await fillMissing(wanted, mapping.setVersions);
 
   const missing = [...wanted].filter((s) => !existsSync(labelFile(s)));
   writeFileSync(join(DATA, 'labels-missing.txt'), missing.join('\n'));
