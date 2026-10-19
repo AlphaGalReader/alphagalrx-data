@@ -83,6 +83,8 @@ function processBulkFile(name: string, wanted: Set<string>) {
       const version = xml.match(/<versionNumber value="(\d+)"/)?.[1] ?? '';
       if (!setid || !wanted.has(setid)) {
         skipped++;
+      } else if (Number(loadLabel(setid)?.version ?? 0) > Number(version)) {
+        skipped++; // an older update file must not overwrite a newer label
       } else {
         writeJson(labelFile(setid), { ...parseSpl(xml, { setid, title: '', publishedDate: '' }), version } satisfies StoredLabel);
         kept++;
