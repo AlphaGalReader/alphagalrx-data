@@ -11,6 +11,8 @@ export interface ShardFormulation {
   labelers: string[]; // distinct company names on the labels
   labelCount: number;
   setid: string; // example DailyMed label
+  /** NDC product code ("00093-5057") → company on that label, for matching a scanned bottle. */
+  codes?: Record<string, string>;
 }
 
 export interface DrugShard {
@@ -47,15 +49,23 @@ export function shardFromLabels(
     const products = label.products.filter((p) => codes.has(p.ndcProduct));
     if (products.length === 0) continue;
     matched++;
+    // A label's "own" labeler code: the one most of its products use (repackagers sometimes list the source NDC too).
+    const prefixCounts = new Map<string, number>();
+    for (const p of label.products) prefixCounts.set(p.ndcProduct.slice(0, 5), (prefixCounts.get(p.ndcProduct.slice(0, 5)) ?? 0) + 1);
+    const ownPrefix = [...prefixCounts].sort((x, y) => y[1] - x[1])[0]?.[0];
 
     for (const product of products) {
       const signature = `${product.form}|${inactiveNames(product.ingredients).join('; ')}`;
       let group = groups.get(signature);
       if (!group) {
-        group = { form: product.form, ingredients: product.ingredients, labelers: [], labelCount: 0, setid: label.setid };
+        group = { form: product.form, ingredients: product.ingredients, labelers: [], labelCount: 0, setid: label.setid, codes: {} };
         groups.set(signature, group);
       }
       if (label.labeler && !group.labelers.includes(label.labeler)) group.labelers.push(label.labeler);
+      // Prefer the label filed by the code's own labeler when several labels list the same code.
+      if (!(product.ndcProduct in group.codes!) || product.ndcProduct.startsWith(ownPrefix ?? '-')) {
+        group.codes![product.ndcProduct] = label.labeler ?? '';
+      }
       const seen = labelsPerGroup.get(signature) ?? new Set<string>();
       seen.add(label.setid);
       labelsPerGroup.set(signature, seen);

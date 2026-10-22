@@ -4,6 +4,7 @@
 // Output (pipeline-data/dist/):
 //   catalog.json          searchable list of drugs → strengths (bundled in the app)
 //   shards/<rxcui>.json   one small file per drug strength, downloaded on demand
+//   ndc/<labeler>.json    NDC product code → strength, one file per labeler code, for scanned bottles
 //   stats.json            coverage numbers for sanity checks
 
 import { gzipSync } from 'node:zlib';
@@ -53,6 +54,8 @@ function main() {
   const mapping = readJson<MappingFile>(MAPPING_JSON);
   const rxnorm = readJson<RxnormFile>(RXNORM_JSON);
   rmSync(join(DIST, 'shards'), { recursive: true, force: true });
+  rmSync(join(DIST, 'ndc'), { recursive: true, force: true });
+  const ndcIndex = new Map<string, Record<string, string>>(); // labeler code → product code → rxcui
 
   // Brand for each FDA application number, e.g. NDA019430 → EpiPen.
   const brandByNda = new Map<string, string>();
@@ -84,6 +87,15 @@ function main() {
       return;
     }
 
+    for (const f of shard.formulations) {
+      for (const code of Object.keys(f.codes ?? {})) {
+        const [labeler, product] = code.split('-');
+        const entry = ndcIndex.get(labeler) ?? {};
+        entry[product] = rxcui;
+        ndcIndex.set(labeler, entry);
+      }
+    }
+
     const file = join(DIST, 'shards', `${rxcui}.json`);
     writeJson(file, shard);
     const raw = readFileSync(file);
@@ -110,6 +122,12 @@ function main() {
     d.brands.sort();
     d.strengths.sort((a, b) => formRank(a.name) - formRank(b.name) || a.name.localeCompare(b.name, undefined, { numeric: true }));
   }
+  let ndcCodes = 0;
+  for (const [labeler, entry] of ndcIndex) {
+    writeJson(join(DIST, 'ndc', `${labeler}.json`), entry);
+    ndcCodes += Object.keys(entry).length;
+  }
+
   const catalog: DrugCatalog = { v: 1, builtAt: new Date().toISOString().slice(0, 10), drugs };
   writeJson(join(DIST, 'catalog.json'), catalog);
   const catalogBytes = readFileSync(join(DIST, 'catalog.json'));
@@ -121,6 +139,8 @@ function main() {
     strengthsWithoutLabels: noLabels,
     shardsMB: +(totalBytes / 1e6).toFixed(1),
     shardsGzippedMB: +(totalGz / 1e6).toFixed(1),
+    ndcLabelers: ndcIndex.size,
+    ndcCodes,
     catalogKB: Math.round(catalogBytes.length / 1024),
     catalogGzippedKB: Math.round(gzipSync(catalogBytes).length / 1024),
   };
